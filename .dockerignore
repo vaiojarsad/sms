@@ -1,0 +1,8 @@
+.git
+.idea
+Dockerfile
+.dockerignore
+bin
+.gitignore
+Makefile
+scripts
