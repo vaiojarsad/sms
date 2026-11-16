@@ -1,8 +1,13 @@
+BUILDER ?= multiarch
+PLATFORMS ?= linux/amd64,linux/arm64
+
 IMAGE_NAME ?= sms
 REGISTRY ?= 19741976.xyz
+
 PORT ?= 8080
 HOST_PORT ?= 8080
 DBUS_SOCKET ?= /run/dbus/system_bus_socket
+
 VERSION = $(shell sh scripts/version.sh)
 COMMIT = $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 GOEXE = $(shell go env GOEXE)
@@ -11,10 +16,18 @@ GOEXE = $(shell go env GOEXE)
 
 build:
 	mkdir -p bin
-	go build -trimpath -ldflags="-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)" -o bin/sms$(GOEXE) .
+	go build -trimpath \
+		-ldflags="-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)" \
+		-o bin/sms$(GOEXE) .
 
 build-docker:
-	docker build --build-arg VERSION="$(VERSION)" --build-arg COMMIT="$(COMMIT)" -t $(IMAGE_NAME) .
+	docker buildx build \
+		--builder $(BUILDER) \
+		--platform linux/$(shell go env GOARCH) \
+		--build-arg VERSION="$(VERSION)" \
+		--build-arg COMMIT="$(COMMIT)" \
+		-t $(IMAGE_NAME) \
+		--load .
 
 # Publica una release desde un tag vMAJOR.MINOR.PATCH en un checkout limpio.
 publish:
@@ -34,8 +47,13 @@ publish:
 	fi; \
 	commit=$$(git rev-parse --short=12 HEAD); \
 	image="$(REGISTRY)/$(IMAGE_NAME):$${tag#v}"; \
-	docker build --build-arg VERSION="$${tag#v}" --build-arg COMMIT="$$commit" -t "$$image" .; \
-	docker push "$$image"
+	docker buildx build \
+		--builder $(BUILDER) \
+		--platform $(PLATFORMS) \
+		--build-arg VERSION="$${tag#v}" \
+		--build-arg COMMIT="$$commit" \
+		-t "$$image" \
+		--push .
 
 run-docker:
 	docker run --rm -e PORT=$(PORT) -p $(HOST_PORT):$(PORT) \
