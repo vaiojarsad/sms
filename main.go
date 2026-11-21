@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -9,13 +10,15 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/vaiojarsad/ringy/internal/sms"
 )
 
-// Estos valores se reemplazan al compilar con el Makefile.
 var version = "dev"
 var commit = "unknown"
 
@@ -48,9 +51,40 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /sms", sendSMSHandler)
 
-	address := ":" + strconv.Itoa(port)
-	log.Printf("Servicio REST escuchando en %s", address)
-	log.Fatal(http.ListenAndServe(address, mux))
+	// Configuramos el servidor con timeouts de seguridad
+	srv := &http.Server{
+		Addr:         ":" + strconv.Itoa(port),
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 40 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	// Contexto raíz que se cancela cuando Docker o el SO envían SIGTERM / SIGINT
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Levantamos el servidor en una goroutine para no bloquear el apagado ordenado
+	go func() {
+		log.Printf("Servicio REST escuchando en %s", srv.Addr)
+		if errSrv := srv.ListenAndServe(); errSrv != nil && !errors.Is(errSrv, http.ErrServerClosed) {
+			log.Fatalf("Error fatal en el servidor HTTP: %v", errSrv)
+		}
+	}()
+
+	// Esperamos la señal de apagado (Ctrl+C o docker stop)
+	<-ctx.Done()
+	log.Println("Apagando servidor, esperando que terminen los envíos en curso...")
+
+	// Le damos hasta tiempo para que termine cualquier SMS que esté enviándose
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	if err = srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Error durante el apagado del servidor: %v", err)
+	}
+	_ = sms.Close()
+	log.Println("Servidor detenido correctamente")
 }
 
 func sendSMSHandler(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +107,20 @@ func sendSMSHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := sms.Send(request.Number, request.Message); err != nil {
+	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
+	defer cancel()
+
+	// Pasamos r.Context() hacia la capa de SMS
+	if err := sms.Send(ctx, request.Number, request.Message); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.Printf("Timeout enviando SMS: %v", err)
+			writeError(w, http.StatusGatewayTimeout, "tiempo de espera agotado al enviar el SMS")
+			return
+		}
+		if errors.Is(err, context.Canceled) {
+			log.Printf("Cancelación del lado cliente enviando SMS: %v", err)
+			return
+		}
 		log.Printf("No se pudo enviar el SMS: %v", err)
 		writeError(w, http.StatusInternalServerError, "no se pudo enviar el SMS")
 		return

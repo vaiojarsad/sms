@@ -57,5 +57,5 @@ publish:
 
 run-docker:
 	docker run --rm -e PORT=$(PORT) -p $(HOST_PORT):$(PORT) \
-		-v $(DBUS_SOCKET):/run/dbus/system_bus_socket:ro \
+		-v $(DBUS_SOCKET):/run/dbus/system_bus_socket:ro --stop-timeout 50 \
 		$(IMAGE_NAME)
